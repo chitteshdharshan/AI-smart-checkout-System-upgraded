@@ -6,4 +6,6 @@ numpy
 pillow
 python-multipart
 easyocr
+sentence-transformers
+
 

@@ -120,7 +120,7 @@ const faissSearchController = async (req, res) => {
 
     // Ensure vlm is an object if provided or default to empty object
     const vlmPayload = (vlm && typeof vlm === "object") ? vlm : {};
-    const effectiveThreshold = typeof threshold === "number" ? threshold : 0.45;
+    const effectiveThreshold = typeof threshold === "number" ? threshold : 0.50;
     const effectiveOcr = typeof ocr_text === "string" ? ocr_text : "";
 
     // If neither embedding nor valid vlm provided

@@ -513,7 +513,7 @@ function AddProductModal({ isOpen, onClose, onProductAdded }) {
           {/* 4. OWNER MANDATORY INPUT FIELDS (PRICE & STOCK) */}
           <div style={{ ...styles.row, backgroundColor: "#0f172a", padding: "0.85rem", borderRadius: "0.6rem", border: "1px solid #334155" }}>
             <div style={styles.group}>
-              <label style={{ ...styles.label, color: "#38bdf8", fontWeight: "600" }}>Price ($) *</label>
+              <label style={{ ...styles.label, color: "#38bdf8", fontWeight: "600" }}>Price (₹) *</label>
               <input
                 type="number"
                 step="0.01"

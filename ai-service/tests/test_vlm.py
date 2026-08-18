@@ -41,12 +41,32 @@ class TestVLMModule(unittest.TestCase):
         result = synthesize_vlm_fallback(
             ocr_text="MAGGI Masala 70g",
             ocr_lines=["MAGGI", "Masala", "70g"],
-            class_name="packet"
+            class_name="product"
         )
         self.assertEqual(result["brand"], "Maggi")
-        self.assertEqual(result["flavor"], "Masala")
         self.assertEqual(result["weight"], "70g")
-        self.assertEqual(result["category"], "Instant Noodles")
+        self.assertTrue(result["product_found"])
+
+    def test_vlm_fallback_insufficient_evidence(self):
+        result = synthesize_vlm_fallback(
+            ocr_text="",
+            ocr_lines=[],
+            class_name="product"
+        )
+        self.assertEqual(result["brand"], "UNKNOWN")
+        self.assertEqual(result["product_name"], "UNKNOWN")
+        self.assertEqual(result["confidence"], 0.0)
+        self.assertFalse(result["product_found"])
+
+    def test_vlm_fallback_non_product(self):
+        result = synthesize_vlm_fallback(
+            ocr_text="Random text",
+            ocr_lines=["Random"],
+            class_name="person"
+        )
+        self.assertEqual(result["brand"], "UNKNOWN")
+        self.assertEqual(result["confidence"], 0.0)
+        self.assertFalse(result["product_found"])
 
 if __name__ == "__main__":
     unittest.main()

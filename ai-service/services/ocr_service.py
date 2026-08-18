@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 from models.ocr_model import get_ocr_reader
-from services.text_cleaner import clean_ocr_text, clean_ocr_lines
+from services.text_cleaner import clean_ocr_text, clean_ocr_lines, normalize_ocr_text
 
 # AI-service root directory (parent of services/)
 _SERVICE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -43,12 +43,12 @@ def extract_text_from_crop(image_path):
     if not resolved_path or not os.path.exists(resolved_path):
         print(f"[OCR INPUT] ERROR: Crop file NOT FOUND at '{resolved_path}' (original: '{image_path}')")
         print(f"[OCR INPUT] This is the root cause of empty OCR. Check crop_service produces absolute paths.")
-        return {"text": "", "raw_text": "", "lines": [], "confidence": 0.0, "source": "crop"}
+        return {"text": "", "raw_text": "", "normalized_text": "", "lines": [], "confidence": 0.0, "source": "crop"}
 
     img = cv2.imread(resolved_path)
     if img is None:
         print(f"[OCR INPUT] ERROR: cv2.imread failed for: {resolved_path}")
-        return {"text": "", "raw_text": "", "lines": [], "confidence": 0.0, "source": "crop"}
+        return {"text": "", "raw_text": "", "normalized_text": "", "lines": [], "confidence": 0.0, "source": "crop"}
 
     h, w = img.shape[:2]
     channels = img.shape[2] if len(img.shape) > 2 else 1
@@ -134,13 +134,13 @@ def extract_text_from_crop(image_path):
     else:
         best = {"pass": "none", "text": "", "lines": [], "confidence": 0.0}
 
-    print(f"[OCR TEXT] Best pass: {best['pass']}")
-    print(f"[OCR TEXT] Final extracted text: '{best['text']}' (conf: {best['confidence']})")
-    print(f"[OCR TEXT] Lines: {best['lines']}")
+    normalized = normalize_ocr_text(best["text"])
+    print(f"[OCR NORMALIZED] '{normalized}'")
 
     return {
         "text": best["text"],
         "raw_text": best["text"],
+        "normalized_text": normalized,
         "lines": best["lines"],
         "confidence": best["confidence"],
         "source": "crop"

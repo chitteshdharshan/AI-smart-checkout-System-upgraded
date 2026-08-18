@@ -50,7 +50,7 @@ function CategoryDropdown({
       e.preventDefault();
       e.stopPropagation();
     }
-    onChange(categoryObj._id);
+    onChange(categoryObj ? categoryObj._id : "");
     setIsOpen(false);
     setSearch("");
   };
@@ -83,14 +83,30 @@ function CategoryDropdown({
         disabled={disabled}
         style={{
           ...styles.trigger,
-          borderColor: isOpen ? "#38bdf8" : "#334155",
+          borderColor: isOpen ? "#38bdf8" : "rgba(51, 65, 85, 0.8)",
+          boxShadow: isOpen ? "0 0 10px rgba(56, 189, 248, 0.2)" : "none",
           opacity: disabled ? 0.6 : 1,
         }}
+        className="touch-btn"
       >
         <span style={styles.triggerText}>
           {currentCategoryObj ? currentCategoryObj.name : placeholder}
         </span>
-        <span style={styles.arrow}>{isOpen ? "▲" : "▼"}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+          {selectedCategory && (
+            <span
+              onClick={(e) => {
+                e.stopPropagation();
+                onChange("");
+              }}
+              style={styles.clearBtn}
+              title="Clear category filter"
+            >
+              ✕
+            </span>
+          )}
+          <span style={styles.arrow}>{isOpen ? "▲" : "▼"}</span>
+        </div>
       </button>
 
       {/* Dropdown Options List */}
@@ -111,6 +127,22 @@ function CategoryDropdown({
 
           {/* Category Items List */}
           <div style={styles.optionsList}>
+            {/* All Categories reset option */}
+            <button
+              type="button"
+              onClick={(e) => handleSelect(null, e)}
+              style={{
+                ...styles.option,
+                backgroundColor: !selectedCategory ? "rgba(56, 189, 248, 0.12)" : "transparent",
+                color: !selectedCategory ? "#38bdf8" : "#94a3b8",
+                fontWeight: !selectedCategory ? "700" : "500",
+                borderBottom: "1px solid rgba(51, 65, 85, 0.4)",
+              }}
+            >
+              <span>🌐 All Categories</span>
+              {!selectedCategory && <span style={{ color: "#38bdf8" }}>✓</span>}
+            </button>
+
             {filteredCategories.length > 0 ? (
               filteredCategories.map((cat) => {
                 const isSelected =
@@ -122,9 +154,9 @@ function CategoryDropdown({
                     onClick={(e) => handleSelect(cat, e)}
                     style={{
                       ...styles.option,
-                      backgroundColor: isSelected ? "#1e293b" : "transparent",
+                      backgroundColor: isSelected ? "rgba(56, 189, 248, 0.15)" : "transparent",
                       color: isSelected ? "#38bdf8" : "#f8fafc",
-                      fontWeight: isSelected ? "600" : "400",
+                      fontWeight: isSelected ? "700" : "500",
                     }}
                   >
                     <span>{cat.name}</span>
@@ -169,52 +201,65 @@ const styles = {
   },
   trigger: {
     width: "100%",
-    padding: "0.65rem 0.85rem",
-    backgroundColor: "#0f172a",
-    border: "1px solid #334155",
-    borderRadius: "0.5rem",
+    padding: "0.75rem 1rem",
+    backgroundColor: "rgba(11, 18, 32, 0.85)",
+    border: "1px solid rgba(51, 65, 85, 0.8)",
+    borderRadius: "0.75rem",
     color: "#f8fafc",
     display: "flex",
-    justify: "space-between",
+    justifyContent: "space-between",
     alignItems: "center",
     cursor: "pointer",
     textAlign: "left",
     fontSize: "0.9rem",
     outline: "none",
+    minHeight: "44px",
+    transition: "border-color 0.2s, box-shadow 0.2s",
   },
   triggerText: {
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
+    fontWeight: "500",
   },
   arrow: {
+    fontSize: "0.72rem",
+    color: "#94a3b8",
+    marginLeft: "0.25rem",
+  },
+  clearBtn: {
     fontSize: "0.75rem",
     color: "#94a3b8",
-    marginLeft: "0.5rem",
+    padding: "0.15rem 0.35rem",
+    borderRadius: "0.25rem",
+    backgroundColor: "rgba(51, 65, 85, 0.5)",
+    cursor: "pointer",
+    transition: "color 0.15s, background-color 0.15s",
   },
   menu: {
     position: "absolute",
-    top: "calc(100% + 4px)",
+    top: "calc(100% + 6px)",
     left: 0,
     right: 0,
-    backgroundColor: "#0f172a",
-    border: "1px solid #334155",
-    borderRadius: "0.5rem",
-    boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.7)",
-    zIndex: 2000,
+    width: "100%",
+    backgroundColor: "#0b1220",
+    border: "1px solid rgba(56, 189, 248, 0.35)",
+    borderRadius: "0.75rem",
+    boxShadow: "0 15px 35px -5px rgba(0, 0, 0, 0.85), 0 0 15px rgba(56, 189, 248, 0.15)",
+    zIndex: 1000,
     overflow: "hidden",
   },
   searchBox: {
-    padding: "0.5rem",
-    borderBottom: "1px solid #1e293b",
-    backgroundColor: "#1e293b",
+    padding: "0.6rem",
+    borderBottom: "1px solid rgba(51, 65, 85, 0.8)",
+    backgroundColor: "rgba(15, 23, 42, 0.95)",
   },
   searchInput: {
     width: "100%",
     padding: "0.5rem 0.75rem",
-    backgroundColor: "#0f172a",
-    border: "1px solid #334155",
-    borderRadius: "0.375rem",
+    backgroundColor: "rgba(11, 18, 32, 0.9)",
+    border: "1px solid rgba(51, 65, 85, 0.8)",
+    borderRadius: "0.5rem",
     color: "#f8fafc",
     fontSize: "0.85rem",
     outline: "none",
@@ -226,7 +271,7 @@ const styles = {
     flexDirection: "column",
   },
   option: {
-    padding: "0.6rem 0.85rem",
+    padding: "0.65rem 0.9rem",
     border: "none",
     background: "none",
     textAlign: "left",
@@ -239,16 +284,16 @@ const styles = {
     width: "100%",
   },
   noResults: {
-    padding: "0.75rem",
-    fontSize: "0.8rem",
+    padding: "0.85rem",
+    fontSize: "0.82rem",
     color: "#64748b",
     textAlign: "center",
   },
   createTypedOption: {
-    padding: "0.65rem 0.85rem",
-    backgroundColor: "#1e1b4b",
+    padding: "0.65rem 0.9rem",
+    backgroundColor: "rgba(30, 27, 75, 0.8)",
     border: "none",
-    borderTop: "1px solid #312e81",
+    borderTop: "1px solid rgba(49, 46, 129, 0.6)",
     color: "#a5b4fc",
     fontWeight: "600",
     textAlign: "left",
@@ -257,10 +302,10 @@ const styles = {
     width: "100%",
   },
   addCategoryBtn: {
-    padding: "0.65rem 0.85rem",
-    backgroundColor: "#064e3b",
+    padding: "0.65rem 0.9rem",
+    backgroundColor: "rgba(6, 78, 59, 0.8)",
     border: "none",
-    borderTop: "1px solid #065f46",
+    borderTop: "1px solid rgba(6, 95, 70, 0.6)",
     color: "#6ee7b7",
     fontWeight: "600",
     textAlign: "left",

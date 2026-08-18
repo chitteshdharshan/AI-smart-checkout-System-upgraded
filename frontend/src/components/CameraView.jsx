@@ -47,6 +47,7 @@ function CameraView({
   onCaptureProcessed,
 }) {
   const [scannerState, setScannerState] = useState("IDLE");
+  const [scannerError, setScannerError] = useState(null);
   const scannerStateRef = useRef("IDLE");
   const setScannerStateSync = (newState) => {
     scannerStateRef.current = newState;
@@ -55,6 +56,8 @@ function CameraView({
 
   const [pendingProducts, setPendingProducts] = useState([]);
   const [submittingIds, setSubmittingIds] = useState(new Set());
+  const [uncertainNotice, setUncertainNotice] = useState(null);
+  const uncertainTimerRef = useRef(null);
 
   const currentItem = pendingProducts.length > 0 ? pendingProducts[0] : null;
 
@@ -134,7 +137,7 @@ function CameraView({
     if (currentItem) {
       console.log(`[CONFIRM] Showing product ${currentItem.name}`);
     }
-  }, [currentItem?.trackId]);
+  }, [currentItem?.trackId, currentItem?.scanId]);
 
   const captureVideoFrame = () => {
     const video = webcamRef.current?.video?.video || webcamRef.current?.video;
@@ -142,11 +145,28 @@ function CameraView({
     if (video.readyState < 2) return null;
     if (video.videoWidth === 0 || video.videoHeight === 0) return null;
     const canvas = frameCanvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    
+    // Maintain high fidelity while bounding maximum dimension to optimize payload & latency
+    const origW = video.videoWidth;
+    const origH = video.videoHeight;
+    let targetW = origW;
+    let targetH = origH;
+    const MAX_DIM = 1280;
+    if (targetW > MAX_DIM || targetH > MAX_DIM) {
+      if (targetW >= targetH) {
+        targetH = Math.round((origH * MAX_DIM) / origW);
+        targetW = MAX_DIM;
+      } else {
+        targetW = Math.round((origW * MAX_DIM) / origH);
+        targetH = MAX_DIM;
+      }
+    }
+
+    canvas.width = targetW;
+    canvas.height = targetH;
     const ctx = canvas.getContext("2d");
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+    ctx.drawImage(video, 0, 0, targetW, targetH);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.80);
     return dataURLtoBlob(dataUrl);
   };
 
@@ -163,20 +183,21 @@ function CameraView({
       return;
     }
 
-    console.log("[SCAN] Starting scan");
-    console.log("[FRAME] Capturing current frame");
+    const currentSessionId = ++scanSessionIdRef.current;
+    console.log(`[SCAN] scanId=${currentSessionId} Starting scan`);
 
     const blob = captureVideoFrame();
     if (!blob || blob.size === 0) return;
 
-    console.log("[FRAME] Captured frame");
+    const frameW = frameCanvasRef.current?.width || 0;
+    const frameH = frameCanvasRef.current?.height || 0;
+    console.log(`[FRAME] scanId=${currentSessionId} Captured frame (${frameW}x${frameH}, ${blob.size} bytes)`);
+
     scannerLockedRef.current = true;
     yoloLockRef.current = true;
     capturedFrameRef.current = blob;
-    console.log("[SCAN] Frame LOCKED");
-
-    const currentSessionId = ++scanSessionIdRef.current;
-    console.log("[YOLO] Sending locked frame");
+    console.log(`[SCAN] scanId=${currentSessionId} Frame LOCKED`);
+    console.log(`[YOLO] scanId=${currentSessionId} Sending frame`);
 
     const tYoloStart = performance.now();
     try {
@@ -193,18 +214,24 @@ function CameraView({
         throw new Error(`YOLO upload failed: ${resp.status}`);
       }
       const result = await resp.json();
-      console.log("[YOLO] Response completed");
-      const rawDetections = result.detections || [];
-      const detections = rawDetections.map(d => ({ ...d, yoloTimeMs: tYoloMs }));
-      console.log(`[YOLO] Detection count: ${detections.length}`);
-      console.log(`[TRACK] Creating tracks for ${detections.length} detections`);
+      console.log(`[YOLO] scanId=${currentSessionId} request completed (${tYoloMs} ms)`);
 
-      updateTracks(detections, currentSessionId);
+      if (currentSessionId !== scanSessionIdRef.current) {
+        console.log(`[STALE] Ignoring result: scan=${currentSessionId} current=${scanSessionIdRef.current}`);
+        return result;
+      }
+
+      setScannerError(null);
+      const rawDetections = result.detections || [];
+      const detections = rawDetections.map(d => ({ ...d, yoloTimeMs: tYoloMs, frameW, frameH }));
+      console.log(`[YOLO] scanId=${currentSessionId} Detection count: ${detections.length}`);
+
+      updateTracks(detections, currentSessionId, blob);
       return result;
     } catch (e) {
-      console.error("[YOLO] request error", e);
+      console.error(`[YOLO] scanId=${currentSessionId} request error:`, e.message);
+      setScannerError("AI Scanner temporarily unavailable. Please retry.");
       scannerLockedRef.current = false;
-      throw e;
     } finally {
       yoloLockRef.current = false;
     }
@@ -215,19 +242,27 @@ function CameraView({
       (h) => computeIoU(box, h.box) > HANDLED_IOU_THRESHOLD
     );
 
-  const enqueueTrack = (trackId, detection, sessionId) => {
-    if (queuedTrackIdsRef.current.has(trackId))   return;
-    if (activeTrackIdsRef.current.has(trackId))   return;
-    if (matchedTrackIdsRef.current.has(trackId))  return;
-    if (processedTrackIdsRef.current.has(trackId)) return;
-    if (isBoxHandled(detection.box))              return;
+  const getScopedKey = (sessionId, trackId) => `${sessionId}_${trackId}`;
 
-    queuedTrackIdsRef.current.add(trackId);
-    queueRef.current.push({ trackId, detection, sessionId });
-    console.log(`[AI QUEUE] Track ${trackId} added`);
+  const enqueueTrack = (trackId, detection, sessionId, frameBlob) => {
+    const scopedKey = getScopedKey(sessionId, trackId);
+    if (queuedTrackIdsRef.current.has(scopedKey))   return;
+    if (activeTrackIdsRef.current.has(scopedKey))   return;
+    if (matchedTrackIdsRef.current.has(scopedKey))  return;
+    if (processedTrackIdsRef.current.has(scopedKey)) return;
+    if (isBoxHandled(detection.box))                return;
+
+    queuedTrackIdsRef.current.add(scopedKey);
+    queueRef.current.push({ trackId, detection, sessionId, frameBlob });
+    console.log(`[AI QUEUE] Track ${trackId} added for scan ${sessionId}`);
   };
 
-  const updateTracks = (detections, sessionId) => {
+  const updateTracks = (detections, sessionId, frameBlob) => {
+    if (sessionId !== scanSessionIdRef.current) {
+      console.log(`[STALE] Ignoring updateTracks: scan=${sessionId} current=${scanSessionIdRef.current}`);
+      return;
+    }
+
     const now      = Date.now();
     const registry = trackRegistryRef.current;
 
@@ -271,15 +306,16 @@ function CameraView({
         const info = registry.get(bestId);
         info.lastSeen  = now;
         info.detection = { ...det, box: curBox };
+        info.sessionId = sessionId;
         registry.set(bestId, info);
 
-        console.log(`[TRACK] Track ${bestId} updated with new detection`);
+        console.log(`[TRACK] scanId=${sessionId} trackId=${bestId} Updating existing track`);
         if (!isBoxHandled(curBox)) {
-          enqueueTrack(bestId, info.detection, sessionId);
+          enqueueTrack(bestId, info.detection, sessionId, frameBlob);
         }
       } else {
         const newId = trackIdCounterRef.current++;
-        console.log(`[TRACK] Track ${newId} detected`);
+        console.log(`[TRACK] scanId=${sessionId} trackId=${newId} Creating new track`);
         registry.set(newId, {
           trackId:   newId,
           detection: { ...det, box: curBox },
@@ -289,11 +325,10 @@ function CameraView({
           sessionId: sessionId,
         });
 
-        console.log(`[TRACK] Creating new track ${newId}`);
         if (isBoxHandled(curBox)) {
-          console.log(`[TRACK] Track ${newId} already handled — skipping`);
+          console.log(`[TRACK] scanId=${sessionId} trackId=${newId} already handled — skipping`);
         } else {
-          enqueueTrack(newId, { ...det, box: curBox }, sessionId);
+          enqueueTrack(newId, { ...det, box: curBox }, sessionId, frameBlob);
         }
       }
     });
@@ -301,17 +336,12 @@ function CameraView({
     for (const [id, info] of registry.entries()) {
       if (now - info.lastSeen > TRACK_STALE_MS) {
         registry.delete(id);
-        queuedTrackIdsRef.current.delete(id);
-        activeTrackIdsRef.current.delete(id);
-        processedTrackIdsRef.current.delete(id);
-        matchedTrackIdsRef.current.delete(id);
-        beepedTracksRef.current.delete(id);
       }
     }
 
     const frameCount      = detections.length;
     const activeCount     = registry.size;
-    const queuedCount     = queuedTrackIdsRef.current.size;
+    const queuedCount     = queueRef.current.length;
     const processingCount = activeTrackIdsRef.current.size;
     const handledCount    = handledObjectsRef.current.length;
     console.log(`[PIPELINE] Frame detections: ${frameCount}`);
@@ -335,34 +365,43 @@ function CameraView({
       activeTrackIdsRef.current.size < MAX_CONCURRENT_PRODUCT_PIPELINES
     ) {
       const item = queueRef.current.shift();
-      const { trackId, detection, sessionId } = item;
-      queuedTrackIdsRef.current.delete(trackId);
+      const { trackId, detection, sessionId, frameBlob } = item;
+      const scopedKey = getScopedKey(sessionId, trackId);
+      queuedTrackIdsRef.current.delete(scopedKey);
 
-      activeTrackIdsRef.current.add(trackId);
-      console.log(`[AI QUEUE] Track ${trackId} processing`);
+      activeTrackIdsRef.current.add(scopedKey);
+      console.log(`[AI QUEUE] Track ${trackId} processing for scan ${sessionId}`);
 
-      runPipelineForTrack(trackId, detection, sessionId);
+      runPipelineForTrack(trackId, detection, sessionId, frameBlob);
     }
   };
 
-  const runPipelineForTrack = async (trackId, detection, sessionId) => {
+  const runPipelineForTrack = async (trackId, detection, sessionId, frameBlob) => {
+    const scopedKey = getScopedKey(sessionId, trackId);
     const tStart = performance.now();
     const yoloTimeMs = detection.yoloTimeMs || 0;
     let tOcrMs = 0, tVlmMs = 0, tEmbedMs = 0, tFaissMs = 0, tDbMs = 0;
 
     try {
-      const blob = capturedFrameRef.current || captureVideoFrame();
-      if (!blob) return;
+      if (sessionId !== scanSessionIdRef.current) {
+        console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
+        return;
+      }
+
+      const sourceBlob = frameBlob || capturedFrameRef.current || captureVideoFrame();
+      if (!sourceBlob) return;
 
       // Crop directly from frozen captured frame image
-      let frameImageSource = frameCanvasRef.current;
-      if (capturedFrameRef.current) {
-        const imgUrl = URL.createObjectURL(capturedFrameRef.current);
-        const img = new Image();
-        img.src = imgUrl;
-        await new Promise((res) => { img.onload = res; img.onerror = res; });
-        frameImageSource = img;
-        URL.revokeObjectURL(imgUrl);
+      const imgUrl = URL.createObjectURL(sourceBlob);
+      const img = new Image();
+      img.src = imgUrl;
+      await new Promise((res) => { img.onload = res; img.onerror = res; });
+      URL.revokeObjectURL(imgUrl);
+      const frameImageSource = img;
+
+      if (sessionId !== scanSessionIdRef.current) {
+        console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
+        return;
       }
 
       const { x, y, w, h } = detection.box;
@@ -375,45 +414,45 @@ function CameraView({
         cropCanvas.toBlob(res, "image/jpeg", 0.85)
       );
 
-      const tOcrStart = performance.now();
-      const ocrResp = await fetch("/api/ai/ocr", {
-        method: "POST",
-        body: (() => {
-          const fd = new FormData();
-          fd.append("image", cropBlob, "crop.jpg");
-          return fd;
-        })(),
-      });
-      tOcrMs = Math.round(performance.now() - tOcrStart);
+      // 2 & 3. Run OCR and Qwen2.5-VL concurrently on the product crop
+      const tInferStart = performance.now();
+      const [ocrResp, vlmResp] = await Promise.all([
+        fetch("/api/ai/ocr", {
+          method: "POST",
+          body: (() => {
+            const fd = new FormData();
+            fd.append("image", cropBlob, "crop.jpg");
+            return fd;
+          })(),
+        }),
+        fetch("/api/ai/vlm", {
+          method: "POST",
+          body: (() => {
+            const fd = new FormData();
+            fd.append("image", cropBlob, "crop.jpg");
+            return fd;
+          })(),
+        }),
+      ]);
+      tOcrMs = Math.round(performance.now() - tInferStart);
+      tVlmMs = tOcrMs;
+
       if (!ocrResp.ok) throw new Error(`OCR request failed: ${ocrResp.status}`);
+      if (!vlmResp.ok) throw new Error(`VLM request failed: ${vlmResp.status}`);
+
       const ocrResult = await ocrResp.json();
       const ocrText = ocrResult?.ocr?.text || "";
+      const normOcr = ocrResult?.ocr?.normalized_text || ocrText;
+      console.log(`[OCR] scanId=${sessionId} trackId=${trackId} text="${ocrText}"`);
 
-      if (sessionId && sessionId !== scanSessionIdRef.current) {
-        console.log(`[AI] Ignoring stale session: ${sessionId}`);
+      if (sessionId !== scanSessionIdRef.current) {
+        console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
         return;
       }
 
-      const tVlmStart = performance.now();
-      const vlmResp = await fetch("/api/ai/vlm", {
-        method: "POST",
-        body: (() => {
-          const fd = new FormData();
-          fd.append("image", cropBlob, "crop.jpg");
-          return fd;
-        })(),
-      });
-      tVlmMs = Math.round(performance.now() - tVlmStart);
-      if (!vlmResp.ok) throw new Error(`VLM request failed: ${vlmResp.status}`);
       const vlmResult = await vlmResp.json();
-
-      if (sessionId && sessionId !== scanSessionIdRef.current) {
-        console.log(`[AI] Ignoring stale session: ${sessionId}`);
-        return;
-      }
-
-      const tEmbedStart = performance.now();
       const vlmPayload = vlmResult?.vlm || vlmResult || {};
+
       const ignoredTokens = new Set([
         "generic", "product", "standard", "n/a", "general", "unknown",
         "retail", "pack", "full_frame", "none", "(none)", "null", "undefined",
@@ -429,27 +468,40 @@ function CameraView({
       const cleanFlavor = extractCleanTokens(vlmPayload.flavor || vlmPayload.variant);
       const cleanWeight = extractCleanTokens(vlmPayload.weight || vlmPayload.netVolume);
       const cleanCategory = extractCleanTokens(vlmPayload.category);
-      const cleanOcr = extractCleanTokens(ocrText);
+      const vlmConfidence = vlmPayload.confidence !== undefined ? vlmPayload.confidence : 0.0;
 
-      const searchableText = [
-        cleanBrand, cleanProduct, cleanFlavor, cleanWeight, cleanCategory, cleanOcr,
+      console.log(`[VLM] scanId=${sessionId} trackId=${trackId} brand="${cleanBrand || "Generic"}" product_name="${cleanProduct || "UNKNOWN"}" confidence=${vlmConfidence}`);
+
+      if (sessionId !== scanSessionIdRef.current) {
+        console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
+        return;
+      }
+
+      // 4. Recognition Fusion: Combine OCR + Qwen2.5-VL recognition signals
+      const combinedFusion = [
+        cleanBrand, cleanProduct, cleanFlavor, cleanWeight, cleanCategory, normOcr,
       ]
         .filter(Boolean)
         .join(" ")
         .trim();
 
+      console.log(`[FUSION] scanId=${sessionId} trackId=${trackId} OCR="${ocrText}" VLM="${cleanBrand} ${cleanProduct}" combined="${combinedFusion}"`);
+
+      // 5. Generate embedding from fused text
+      const tEmbedStart = performance.now();
       const embedResp = await fetch("/api/ai/embed", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: searchableText || "retail product" }),
+        body: JSON.stringify({ text: combinedFusion || "retail product" }),
       });
       tEmbedMs = Math.round(performance.now() - tEmbedStart);
       if (!embedResp.ok) throw new Error(`Embedding request failed: ${embedResp.status}`);
       const embedResult = await embedResp.json();
       const embeddingVector = embedResult?.embedding || [];
+      console.log(`[EMBEDDING] scanId=${sessionId} trackId=${trackId} generated (${tEmbedMs} ms)`);
 
-      if (sessionId && sessionId !== scanSessionIdRef.current) {
-        console.log(`[AI] Ignoring stale session: ${sessionId}`);
+      if (sessionId !== scanSessionIdRef.current) {
+        console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
         return;
       }
 
@@ -458,7 +510,8 @@ function CameraView({
         return;
       }
 
-      console.log(`[FAISS] Track ${trackId} searching`);
+      // 6. FAISS Top-K Search
+      console.log(`[FAISS] scanId=${sessionId} trackId=${trackId} searching Top-K candidates`);
       const tFaissStart = performance.now();
       const faissResp = await fetch("/api/ai/faiss/search", {
         method: "POST",
@@ -466,8 +519,8 @@ function CameraView({
         body: JSON.stringify({
           embedding: embeddingVector,
           vlm: vlmPayload,
-          ocr_text: ocrText,
-          threshold: 0.30,
+          ocr_text: normOcr,
+          threshold: 0.50,
         }),
       });
       tFaissMs = Math.round(performance.now() - tFaissStart);
@@ -475,25 +528,43 @@ function CameraView({
       const faissResult = await faissResp.json();
       const match = faissResult?.match || {};
       const similarity = match.similarity || 0;
+      const finalScore = match.final_score || match.similarity || 0;
 
-      if (sessionId && sessionId !== scanSessionIdRef.current) {
-        console.log(`[AI] Ignoring stale session: ${sessionId}`);
+      // Structured FAISS Debug Logging
+      console.log("[FAISS] Raw response:", faissResult);
+      console.log(`[FAISS] Returned product_id: ${match.product_id || "none"}`);
+      console.log(`[FAISS] Returned product name: ${match.name || "none"}`);
+      console.log(`[FAISS] similarity: ${similarity.toFixed(4)}`);
+
+      if (match.candidates && match.candidates.length > 0) {
+        const topCandidate = match.candidates[0];
+        console.log(`[FAISS] scanId=${sessionId} trackId=${trackId} candidate="${topCandidate.name}" similarity=${(topCandidate.similarity || 0).toFixed(2)}`);
+      }
+
+      if (sessionId !== scanSessionIdRef.current) {
+        console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
         return;
       }
 
-      const isMatched = match.matched && similarity >= 0.30 && match.product_id;
+      const isMatched = Boolean(match.matched && match.product_id);
 
       if (isMatched) {
         const mongoId = String(match.product_id);
-        console.log(`[FAISS] Track ${trackId} matched product: ${mongoId}`);
-        matchedTrackIdsRef.current.add(trackId);
+        console.log(`[DB] Resolving product_id=${mongoId}`);
 
         const tDbStart = performance.now();
         const prodResp = await fetch(`/api/products/${mongoId}`);
         tDbMs = Math.round(performance.now() - tDbStart);
 
         if (!prodResp.ok) {
-          console.warn(`[DB] Product not found: ${mongoId}`);
+          console.warn(`[DB] Product ID not found in catalog: ${mongoId}`);
+          console.warn(`[DB] Rejecting FAISS candidate instead of displaying wrong product`);
+          console.log(`[MATCH] Rejected track ${trackId}: reason=PRODUCT_ID_NOT_IN_CATALOG score=${finalScore.toFixed(2)}`);
+          if (uncertainTimerRef.current) clearTimeout(uncertainTimerRef.current);
+          setUncertainNotice("PRODUCT UNCERTAIN - PLEASE RESCAN");
+          uncertainTimerRef.current = setTimeout(() => {
+            setUncertainNotice(null);
+          }, 3000);
           return;
         }
 
@@ -501,21 +572,32 @@ function CameraView({
         const dbProduct = prodData?.product;
 
         if (!dbProduct || !dbProduct._id) {
-          console.warn(`[DB] Product not found: ${mongoId}`);
+          console.warn(`[DB] Product ID not found in catalog: ${mongoId}`);
+          console.warn(`[DB] Rejecting FAISS candidate instead of displaying wrong product`);
+          console.log(`[MATCH] Rejected track ${trackId}: reason=PRODUCT_ID_NOT_IN_CATALOG score=${finalScore.toFixed(2)}`);
+          if (uncertainTimerRef.current) clearTimeout(uncertainTimerRef.current);
+          setUncertainNotice("PRODUCT UNCERTAIN - PLEASE RESCAN");
+          uncertainTimerRef.current = setTimeout(() => {
+            setUncertainNotice(null);
+          }, 3000);
           return;
         }
 
-        if (sessionId && sessionId !== scanSessionIdRef.current) {
-          console.log(`[AI] Ignoring stale session: ${sessionId}`);
+        if (sessionId !== scanSessionIdRef.current) {
+          console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
           return;
         }
 
-        const actualProductName = dbProduct.name || "Unknown Product";
-        console.log(`[DB] Track ${trackId} product loaded: ${actualProductName}`);
+        // Product successfully validated against real inventory
+        matchedTrackIdsRef.current.add(scopedKey);
 
-        if (!beepedTracksRef.current.has(trackId)) {
-          beepedTracksRef.current.add(trackId);
-          console.log(`[CONFIRM] Track ${trackId} product: ${actualProductName}`);
+        const actualProductName = dbProduct.name || match.name || "Unknown Product";
+        console.log(`[MATCH] scanId=${sessionId} trackId=${trackId} selected="${actualProductName}" confidence=${(finalScore * 100).toFixed(1)}%`);
+        console.log(`[DB] scanId=${sessionId} trackId=${trackId} product="${actualProductName}"`);
+
+        if (!beepedTracksRef.current.has(scopedKey)) {
+          beepedTracksRef.current.add(scopedKey);
+          console.log(`[CONFIRM] scanId=${sessionId} trackId=${trackId} product="${actualProductName}"`);
           console.log("[BEEP] Success tone played");
           playSuccessBeep();
         }
@@ -531,36 +613,38 @@ function CameraView({
           stock: dbProduct.stock !== undefined ? dbProduct.stock : 0,
           category: categoryName,
           aiClassId: dbProduct.aiClassId || "",
-          similarity: similarity,
+          similarity: finalScore,
           box: detection.box,
           trackId: trackId,
+          scanId: sessionId,
         };
 
         setPendingProducts((prev) => {
+          if (prev.some((p) => p.scanId === sessionId && p.trackId === trackId)) return prev;
           if (prev.some((p) => p.trackId === trackId)) return prev;
           const updated = [...prev, pendingData];
-          console.log(`[CONFIRM] Track ${trackId} added to confirmation queue`);
           return updated;
         });
 
         setScannerStateSync("CONFIRMING");
       } else {
-        console.log(`[FAISS] No matching catalog product for track ${trackId}`);
+        console.log(`[MATCH] Rejected track ${trackId}: reason=${match.reason || "NO_CONFIDENT_MATCH"} score=${finalScore.toFixed(2)}`);
+        console.log(`[FAISS] scanId=${sessionId} trackId=${trackId} no confident match found`);
+        if (uncertainTimerRef.current) clearTimeout(uncertainTimerRef.current);
+        setUncertainNotice("PRODUCT UNCERTAIN - PLEASE RESCAN");
+        uncertainTimerRef.current = setTimeout(() => {
+          setUncertainNotice(null);
+        }, 3000);
       }
     } catch (e) {
-      console.error(`[PIPELINE] error for track ${trackId}:`, e);
+      console.error(`[PIPELINE] scanId=${sessionId} trackId=${trackId} error:`, e.message);
+      setScannerError("AI Scanner temporarily unavailable. Please retry.");
     } finally {
       const tTotalMs = Math.round(performance.now() - tStart) + yoloTimeMs;
-      console.log(`[PERF] Track ${trackId} YOLO: ${yoloTimeMs} ms`);
-      console.log(`[PERF] Track ${trackId} OCR: ${tOcrMs} ms`);
-      console.log(`[PERF] Track ${trackId} VLM: ${tVlmMs} ms`);
-      console.log(`[PERF] Track ${trackId} EMBEDDING: ${tEmbedMs} ms`);
-      console.log(`[PERF] Track ${trackId} FAISS: ${tFaissMs} ms`);
-      console.log(`[PERF] Track ${trackId} DB: ${tDbMs} ms`);
-      console.log(`[PERF] Track ${trackId} TOTAL: ${tTotalMs} ms`);
+      console.log(`[PERF] Track ${trackId} TOTAL: ${tTotalMs} ms (YOLO: ${yoloTimeMs}ms, OCR: ${tOcrMs}ms, VLM: ${tVlmMs}ms, EMBED: ${tEmbedMs}ms, FAISS: ${tFaissMs}ms, DB: ${tDbMs}ms)`);
 
-      activeTrackIdsRef.current.delete(trackId);
-      processedTrackIdsRef.current.add(trackId);
+      activeTrackIdsRef.current.delete(scopedKey);
+      processedTrackIdsRef.current.add(scopedKey);
 
       processNextInQueue();
     }
@@ -675,9 +759,8 @@ function CameraView({
     const currentGen = scanGenerationRef.current;
     if (!isScanningRef.current) return;
 
-    if (scannerLockedRef.current || yoloLockRef.current) {
-      console.log("[SCAN] Frame locked - skipping scan");
-      scheduleNextScan(150);
+    if (scannerLockedRef.current || yoloLockRef.current || pendingProducts.length > 0) {
+      scheduleNextScan(350);
       return;
     }
 
@@ -761,9 +844,19 @@ function CameraView({
       setPendingProducts((prev) => {
         const updated = prev.filter((p) => p.trackId !== item.trackId);
         if (updated.length === 0) {
-          // All products from this frame handled – now clear frame and unlock scanner
+          // All products from this frame handled – cleanly reset scanner lifecycle for next scan
           capturedFrameRef.current = null;
-          console.log("[FRAME] Captured frame cleared after final product");
+          handledObjectsRef.current = [];
+          trackRegistryRef.current.clear();
+          matchedTrackIdsRef.current.clear();
+          processedTrackIdsRef.current.clear();
+          queuedTrackIdsRef.current.clear();
+          activeTrackIdsRef.current.clear();
+          beepedTracksRef.current.clear();
+          queueRef.current = [];
+          scanSessionIdRef.current += 1;
+          setRenderTracks([]);
+          console.log("[FRAME] Captured frame and track state cleared after final product");
           scannerLockedRef.current = false;
           console.log("[SCAN] Frame lifecycle completed");
           console.log("[SCAN] Scanner unlocked");
@@ -796,14 +889,23 @@ function CameraView({
       missingCount: 0,
     });
 
-    // Do NOT clear captured frame here; wait until all items are processed
-
+    // Clear and unlock if all items handled
     setPendingProducts((prev) => {
       const updated = prev.filter((p) => p.trackId !== item.trackId);
       if (updated.length === 0) {
-        // All items handled – clear frame and unlock scanner
+        // All items handled – cleanly reset scanner lifecycle for next scan
         capturedFrameRef.current = null;
-        console.log("[FRAME] Captured frame cleared after final cancellation");
+        handledObjectsRef.current = [];
+        trackRegistryRef.current.clear();
+        matchedTrackIdsRef.current.clear();
+        processedTrackIdsRef.current.clear();
+        queuedTrackIdsRef.current.clear();
+        activeTrackIdsRef.current.clear();
+        beepedTracksRef.current.clear();
+        queueRef.current = [];
+        scanSessionIdRef.current += 1;
+        setRenderTracks([]);
+        console.log("[FRAME] Captured frame and track state cleared after final cancellation");
         scannerLockedRef.current = false;
         console.log("[SCAN] Frame lifecycle completed");
         console.log("[SCAN] Scanner unlocked");
@@ -816,6 +918,7 @@ function CameraView({
 
   const getStatusText = () => {
     if (pendingProducts.length > 0) return { icon: "✓", label: "PRODUCT RECOGNIZED", color: "#34d399" };
+    if (uncertainNotice) return { icon: "⚠️", label: uncertainNotice, color: "#f59e0b" };
     if (activeTrackIdsRef.current.size > 0) return { icon: "●", label: "AI PROCESSING...", color: "#38bdf8" };
     if (scannerLockedRef.current || yoloLockRef.current) return { icon: "●", label: "SCANNING OBJECT...", color: "#38bdf8" };
     if (scannerState === "SCANNING") return { icon: "●", label: "AI VISION ACTIVE", color: "#34d399" };
@@ -842,6 +945,34 @@ function CameraView({
         <span style={styles.hudLiveDot} />
         <span>1080P AI VISION FEED</span>
       </div>
+
+      {/* Non-blocking Uncertain Rescan Notification Banner */}
+      {uncertainNotice && pendingProducts.length === 0 && (
+        <div
+          style={{
+            position: "absolute",
+            top: "3.5rem",
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "rgba(245, 158, 11, 0.92)",
+            color: "#0f172a",
+            padding: "0.45rem 1.1rem",
+            borderRadius: "9999px",
+            fontSize: "0.82rem",
+            fontWeight: "800",
+            letterSpacing: "0.04em",
+            zIndex: 35,
+            boxShadow: "0 4px 15px rgba(245, 158, 11, 0.4)",
+            display: "flex",
+            alignItems: "center",
+            gap: "0.4rem",
+            animation: "fadeIn 0.2s ease-in-out",
+          }}
+        >
+          <span>⚠️</span>
+          <span>PRODUCT UNCERTAIN - PLEASE RESCAN</span>
+        </div>
+      )}
 
       <Webcam
         audio={false}
@@ -878,6 +1009,22 @@ function CameraView({
             </span>
           )}
         </div>
+        {scannerError && (
+          <div style={styles.errorBanner}>
+            <span>⚠️ {scannerError}</span>
+            <button
+              onClick={() => {
+                setScannerError(null);
+                scannerLockedRef.current = false;
+                yoloLockRef.current = false;
+                scheduleNextScan(0);
+              }}
+              style={styles.retryBtn}
+            >
+              🔄 Retry
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Single-Product FIFO Confirmation Queue Modal Overlay */}
@@ -1139,6 +1286,28 @@ const styles = {
     borderRadius: "0.75rem",
     fontWeight: "700",
     fontSize: "0.88rem",
+  },
+  errorBanner: {
+    padding: "0.45rem 0.9rem",
+    backgroundColor: "rgba(239, 68, 68, 0.2)",
+    border: "1px solid rgba(239, 68, 68, 0.5)",
+    borderRadius: "0.6rem",
+    color: "#fca5a5",
+    fontSize: "0.82rem",
+    fontWeight: "700",
+    display: "flex",
+    alignItems: "center",
+    gap: "0.6rem",
+  },
+  retryBtn: {
+    padding: "0.25rem 0.6rem",
+    backgroundColor: "#ef4444",
+    color: "#ffffff",
+    border: "none",
+    borderRadius: "0.4rem",
+    fontWeight: "800",
+    fontSize: "0.75rem",
+    cursor: "pointer",
   },
 };
 

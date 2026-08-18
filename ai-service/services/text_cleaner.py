@@ -42,3 +42,41 @@ def clean_ocr_lines(raw_lines):
         if c_line:
             cleaned_lines.append(c_line)
     return cleaned_lines
+
+def normalize_ocr_text(raw_text):
+    """
+    Deep normalization of OCR text for robust fuzzy & multi-signal matching.
+    Converts to lowercase, cleans punctuation, resolves common OCR visual typos,
+    and strips noise without hardcoding specific products.
+    """
+    if not raw_text:
+        return ""
+
+    text = str(raw_text).lower()
+
+    # 1. Replace common symbol confusions
+    text = text.replace("@", "a").replace("$", "s").replace("&", " and ")
+
+    # 2. Fix common OCR character substitutions inside words (e.g., 0 inside letters -> o)
+    text = re.sub(r"(?<=[a-z])0(?=[a-z])", "o", text)
+
+    # 3. Replace unwanted symbols, punctuation, and brackets with spaces
+    text = re.sub(r"[®™!¡?|\[\]{}_;:<>/\\=+~`^*#%]", " ", text)
+    text = re.sub(r"[^a-z0-9\s\-.]", " ", text)
+
+    # 4. Standardize unit representations (e.g. "500 ml" -> "500ml", "70 g" -> "70g", "1.5 kg" -> "1.5kg")
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(g|gs|grams)\b", r"\1g", text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(kg|kgs|kilograms)\b", r"\1kg", text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(ml|mls|milliliters)\b", r"\1ml", text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(l|liters)\b", r"\1l", text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(oz|lb|lbs)\b", r"\1\2", text)
+
+    # 5. Normalize hyphens and dashes to spaces
+    text = re.sub(r"[\-_]+", " ", text)
+
+    # 6. Remove single-character isolated noise tokens (except standalone digits or 'a')
+    tokens = text.split()
+    clean_tokens = [t for t in tokens if len(t) > 1 or t.isdigit() or t == "a"]
+
+    normalized = " ".join(clean_tokens).strip()
+    return normalized

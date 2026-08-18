@@ -11,6 +11,7 @@ function Products() {
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("");
+  const [aiClassId, setAiClassId] = useState("");
   const [inStockOnly, setInStockOnly] = useState(false);
 
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -45,6 +46,23 @@ function Products() {
       .catch((err) => console.error(err));
   }, []);
 
+  const handleResetFilters = () => {
+    setKeyword("");
+    setSelectedCategory("");
+    setAiClassId("");
+    setInStockOnly(false);
+  };
+
+  const hasActiveFilters = Boolean(keyword || selectedCategory || aiClassId || inStockOnly);
+
+  const displayedProducts = products.filter((prod) => {
+    if (aiClassId.trim()) {
+      const target = (prod.aiClassId || "").toLowerCase();
+      if (!target.includes(aiClassId.trim().toLowerCase())) return false;
+    }
+    return true;
+  });
+
   const handleDelete = async (id, name) => {
     if (window.confirm(`Are you sure you want to delete "${name}"?`)) {
       try {
@@ -76,43 +94,75 @@ function Products() {
         </button>
       </div>
 
-      {/* Filter & Search Bar */}
+      {/* Filter & Search Card */}
       <div style={styles.filterCard} className="cyber-glass">
-        <div style={styles.searchGroup}>
-          <label style={styles.filterLabel}>🔍 SEARCH PRODUCT OR SKU</label>
-          <input
-            type="text"
-            placeholder="Search by name, SKU, or brand..."
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            style={styles.filterInput}
-            className="touch-btn"
-          />
+        <div style={styles.filterHeader}>
+          <span style={styles.filterSectionTitle}>⚡ INVENTORY FILTERS</span>
+          {hasActiveFilters && (
+            <button
+              onClick={handleResetFilters}
+              style={styles.resetBtn}
+              className="touch-btn"
+              title="Clear all active filters"
+            >
+              🔄 Reset Filters
+            </button>
+          )}
         </div>
 
-        <div style={styles.filterGroup}>
-          <label style={styles.filterLabel}>🏷️ CATEGORY FILTER</label>
-          <CategoryDropdown
-            categories={categories}
-            selectedCategory={selectedCategory}
-            onChange={(catId) => setSelectedCategory(catId)}
-            onAddNewCategory={(initialTypedName) => {
-              setTypedCategoryName(initialTypedName);
-              setIsAddCategoryOpen(true);
-            }}
-          />
-        </div>
-
-        <div style={styles.checkboxGroup}>
-          <label style={styles.checkboxLabel}>
-            <input
-              type="checkbox"
-              checked={inStockOnly}
-              onChange={(e) => setInStockOnly(e.target.checked)}
-              style={{ width: "18px", height: "18px", accentColor: "#38bdf8" }}
+        <div style={styles.filterGrid}>
+          {/* 1. Category Filter */}
+          <div style={styles.categoryFilterGroup}>
+            <label style={styles.filterLabel}>🏷️ CATEGORY FILTER</label>
+            <CategoryDropdown
+              categories={categories}
+              selectedCategory={selectedCategory}
+              onChange={(catId) => setSelectedCategory(catId)}
+              onAddNewCategory={(initialTypedName) => {
+                setTypedCategoryName(initialTypedName);
+                setIsAddCategoryOpen(true);
+              }}
             />
-            <span>In Stock Only</span>
-          </label>
+          </div>
+
+          {/* 2. AI Class ID Filter */}
+          <div style={styles.aiClassFilterGroup}>
+            <label style={styles.filterLabel}>🤖 AI CLASS ID</label>
+            <input
+              type="text"
+              placeholder="Filter by AI Class ID (e.g. voyage...)"
+              value={aiClassId}
+              onChange={(e) => setAiClassId(e.target.value)}
+              style={styles.filterInput}
+              className="touch-btn"
+            />
+          </div>
+
+          {/* 3. Search Product / SKU */}
+          <div style={styles.searchGroup}>
+            <label style={styles.filterLabel}>🔍 SEARCH PRODUCT OR SKU</label>
+            <input
+              type="text"
+              placeholder="Search by name, SKU, or brand..."
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              style={styles.filterInput}
+              className="touch-btn"
+            />
+          </div>
+
+          {/* 4. In Stock Checkbox */}
+          <div style={styles.checkboxGroup}>
+            <label style={styles.checkboxLabel}>
+              <input
+                type="checkbox"
+                checked={inStockOnly}
+                onChange={(e) => setInStockOnly(e.target.checked)}
+                style={{ width: "18px", height: "18px", accentColor: "#38bdf8", cursor: "pointer" }}
+              />
+              <span>In Stock Only</span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -123,11 +173,20 @@ function Products() {
             <div className="spinner" style={{ width: "32px", height: "32px" }}></div>
             <div style={{ marginTop: "1rem", fontWeight: "700" }}>LOADING STORE INVENTORY...</div>
           </div>
-        ) : products.length === 0 ? (
+        ) : displayedProducts.length === 0 ? (
           <div style={{ padding: "4rem", textAlign: "center", color: "#94a3b8" }}>
             <div style={{ fontSize: "2.5rem", marginBottom: "0.5rem" }}>📦</div>
             <div style={{ fontWeight: "700", color: "#f8fafc", fontSize: "1.1rem" }}>No products found</div>
             <div style={{ fontSize: "0.85rem", marginTop: "0.25rem" }}>Try adjusting your search keyword or category filter.</div>
+            {hasActiveFilters && (
+              <button
+                onClick={handleResetFilters}
+                style={{ ...styles.resetBtn, marginTop: "1rem", display: "inline-block" }}
+                className="touch-btn"
+              >
+                Clear all filters
+              </button>
+            )}
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
@@ -144,7 +203,7 @@ function Products() {
                 </tr>
               </thead>
               <tbody>
-                {products.map((prod) => (
+                {displayedProducts.map((prod) => (
                   <tr key={prod._id} style={styles.tr}>
                     <td style={styles.td}>
                       {prod.images && prod.images.length > 0 ? (() => {
@@ -296,23 +355,67 @@ const styles = {
   filterCard: {
     padding: "1.25rem 1.5rem",
     borderRadius: "1.25rem",
-    display: "flex",
-    gap: "1.5rem",
-    alignItems: "flex-end",
     marginBottom: "1.75rem",
-    flexWrap: "wrap",
     border: "1px solid rgba(56, 189, 248, 0.2)",
+    position: "relative",
+    zIndex: 20,
+    overflow: "visible",
+  },
+  filterHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: "1rem",
+    borderBottom: "1px solid rgba(51, 65, 85, 0.4)",
+    paddingBottom: "0.6rem",
+  },
+  filterSectionTitle: {
+    fontSize: "0.78rem",
+    fontWeight: "800",
+    letterSpacing: "0.08em",
+    color: "#38bdf8",
+  },
+  resetBtn: {
+    padding: "0.3rem 0.75rem",
+    fontSize: "0.75rem",
+    fontWeight: "700",
+    color: "#94a3b8",
+    backgroundColor: "rgba(30, 41, 59, 0.6)",
+    border: "1px solid rgba(71, 85, 105, 0.6)",
+    borderRadius: "0.5rem",
+    cursor: "pointer",
+    transition: "color 0.15s, background-color 0.15s",
+  },
+  filterGrid: {
+    display: "flex",
+    gap: "1.25rem",
+    alignItems: "flex-end",
+    flexWrap: "wrap",
+    position: "relative",
+  },
+  categoryFilterGroup: {
+    flex: "1 1 220px",
+    minWidth: "200px",
+    position: "relative",
+    zIndex: 50,
+  },
+  aiClassFilterGroup: {
+    flex: "1 1 220px",
+    minWidth: "200px",
+    position: "relative",
+    zIndex: 1,
   },
   searchGroup: {
-    flex: "2 1 260px",
-  },
-  filterGroup: {
-    flex: "1 1 200px",
+    flex: "1.5 1 240px",
+    minWidth: "220px",
+    position: "relative",
+    zIndex: 1,
   },
   checkboxGroup: {
-    paddingBottom: "0.5rem",
+    paddingBottom: "0.65rem",
     display: "flex",
     alignItems: "center",
+    minWidth: "120px",
   },
   checkboxLabel: {
     display: "flex",
@@ -340,11 +443,15 @@ const styles = {
     color: "#f8fafc",
     outline: "none",
     fontSize: "0.9rem",
+    minHeight: "44px",
+    boxSizing: "border-box",
   },
   tableCard: {
     borderRadius: "1.25rem",
     overflow: "hidden",
     border: "1px solid rgba(56, 189, 248, 0.2)",
+    position: "relative",
+    zIndex: 1,
   },
   table: {
     width: "100%",

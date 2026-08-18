@@ -29,6 +29,8 @@ build/
 # Runtime uploads & temporary crop/annotated frames
 ai-service/uploads/
 ai-service/outputs/
+ai-service/crops/
+*/crops/
 backend/uploads/captured/
 uploads/captured/
 temp_test_frame.jpg

@@ -106,7 +106,7 @@ const indexProducts = async (products) => {
   }
 };
 
-const matchProduct = async (vlmData, ocrText = "", threshold = 0.8, embedding = null) => {
+const matchProduct = async (vlmData, ocrText = "", threshold = 0.50, embedding = null) => {
   try {
     const payload = { vlm: vlmData, ocr_text: ocrText, threshold };
     if (embedding) {

@@ -20,29 +20,17 @@ def _is_generic_token(token: str) -> bool:
 def build_catalog_text(product: dict) -> str:
     """
     Builds the canonical text representation for a CATALOG product to be indexed.
-
-    Priority:
-      1. `searchableText`  — rich, pre-built text from the backend enrichment
-                              pipeline (name + brand + OCR + category + variant + …).
-      2. Concatenation of all available structured fields as fallback.
-
-    This ensures every product is indexed using the same rich vocabulary that
-    the backend saw at registration time, giving a consistent embedding space.
+    Uses clean structured attributes (name, brand, category, variant, flavor, weight, description)
+    to create a discriminative embedding vector without dilution from fine-print packaging noise.
     """
     if not isinstance(product, dict):
         return str(product)
 
-    # 1. Prefer the backend-generated searchableText (richest signal)
-    st = (product.get("searchableText") or "").strip()
-    if st:
-        print(f"[EMBED] Catalog text (searchableText): '{st[:120]}'")
-        return st
-
-    # 2. Fallback: concatenate structured fields
     brand = product.get("brand") or product.get("brandName") or ""
     name = product.get("product_name") or product.get("name") or product.get("title") or ""
     flavor = product.get("flavor") or product.get("variant") or ""
     weight = product.get("weight") or product.get("netVolume") or ""
+    desc = product.get("description") or ""
 
     cat_val = product.get("category")
     if isinstance(cat_val, dict):
@@ -50,14 +38,21 @@ def build_catalog_text(product: dict) -> str:
     else:
         category = str(cat_val) if cat_val and not re.match(r'^[0-9a-fA-F]{24}$', str(cat_val)) else ""
 
-    ocr_text = product.get("ocr_text") or ""
-    aiClassId = product.get("aiClassId") or ""
+    parts = [name, brand, category, flavor, weight, desc]
+    clean_parts = [str(p).strip() for p in parts if str(p).strip() and str(p).strip() not in ["Generic Product", "N/A"]]
+    combined = " ".join(clean_parts).strip()
 
-    parts = [brand, name, flavor, weight, category, ocr_text, aiClassId]
-    clean_parts = [str(p).strip() for p in parts if str(p).strip()]
-    combined = " ".join(clean_parts)
-    print(f"[EMBED] Catalog text (structured fields): '{combined}'")
-    return combined
+    if combined:
+        print(f"[EMBED] Catalog text (structured fields): '{combined}'")
+        return combined
+
+    # Fallback to searchableText if structured fields are missing
+    st = (product.get("searchableText") or "").strip()
+    if st:
+        print(f"[EMBED] Catalog text (searchableText): '{st[:120]}'")
+        return st
+
+    return "retail product"
 
 
 def build_query_text(vlm_data: dict, ocr_text: str = "") -> str:
