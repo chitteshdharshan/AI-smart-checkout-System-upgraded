@@ -1,8 +1,16 @@
 // Camera.jsx – Streamlined Commercial AI Supermarket Vision Terminal
 import React, { useState, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import CameraView from "../components/CameraView";
+import { useCart } from "../context/CartContext";
 
-function Camera({ onAddToCart, cartCount = 0, onGoToCart }) {
+function Camera({ onAddToCart, cartCount, onGoToCart }) {
+  const navigate = useNavigate();
+  const cartContext = useCart();
+  const effectiveAddToCart = onAddToCart || cartContext.addToCart;
+  const effectiveCartCount = cartCount !== undefined ? cartCount : cartContext.totalCount;
+  const effectiveGoToCart = onGoToCart || (() => navigate("/checkout/cart"));
+
   const webcamRef = useRef(null);
   const [facingMode, setFacingMode] = useState("user");
   const [isScanning, setIsScanning] = useState(false);
@@ -59,9 +67,9 @@ function Camera({ onAddToCart, cartCount = 0, onGoToCart }) {
               {isScanning ? "● SCANNING ACTIVE" : "● READY TO SCAN"}
             </div>
 
-            {cartCount > 0 && onGoToCart && (
-              <button onClick={onGoToCart} style={styles.viewCartMiniBtn} className="touch-btn">
-                🛒 View Cart ({cartCount}) →
+            {effectiveCartCount > 0 && (
+              <button onClick={effectiveGoToCart} style={styles.viewCartMiniBtn} className="touch-btn">
+                🛒 View Cart ({effectiveCartCount}) →
               </button>
             )}
           </div>
@@ -74,7 +82,7 @@ function Camera({ onAddToCart, cartCount = 0, onGoToCart }) {
             facingMode={facingMode}
             setFacingMode={setFacingMode}
             isScanning={isScanning}
-            onAddToCart={onAddToCart}
+            onAddToCart={effectiveAddToCart}
           />
         </div>
 

@@ -1,10 +1,19 @@
 import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import CartTable from "../components/CartTable";
 import BillSummary from "../components/BillSummary";
 import ReceiptModal from "../components/ReceiptModal";
+import { useCart } from "../context/CartContext";
 
-function Billing({ cartItems, setCartItems, onBackToScanner }) {
+function Billing({ cartItems: propsCartItems, setCartItems: propsSetCartItems, onBackToScanner }) {
+  const navigate = useNavigate();
+  const cartContext = useCart();
+
+  const cartItems = propsCartItems !== undefined ? propsCartItems : cartContext.cartItems;
+  const setCartItems = propsSetCartItems || cartContext.setCartItems;
+  const handleBackToScanner = onBackToScanner || (() => navigate("/checkout"));
+
   const [subtotal, setSubtotal] = useState(0);
   const [tax, setTax] = useState(0);
   const [discount, setDiscount] = useState(0);
@@ -95,11 +104,9 @@ function Billing({ cartItems, setCartItems, onBackToScanner }) {
           </p>
         </div>
 
-        {onBackToScanner && (
-          <button onClick={onBackToScanner} style={styles.backBtn} className="touch-btn">
-            📹 ← Back to Scanner
-          </button>
-        )}
+        <button onClick={handleBackToScanner} style={styles.backBtn} className="touch-btn">
+          📹 ← Back to Scanner
+        </button>
       </div>
 
       <div style={styles.grid}>
@@ -135,7 +142,7 @@ function Billing({ cartItems, setCartItems, onBackToScanner }) {
         bill={activeBill}
         isOpen={showReceipt}
         onClose={() => setShowReceipt(false)}
-        onNewShopping={onBackToScanner}
+        onNewShopping={handleBackToScanner}
       />
     </div>
   );

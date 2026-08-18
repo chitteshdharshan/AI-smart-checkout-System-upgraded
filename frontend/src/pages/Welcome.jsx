@@ -1,8 +1,26 @@
 import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import heroVideo from "../assets/aismart.mp4";
 
-function Welcome({ onStartShopping, onGoToInventory, onGoToDashboard }) {
+function Welcome({ onStartShopping, onGoToCart }) {
+  const navigate = useNavigate();
   const [videoError, setVideoError] = useState(false);
+
+  const handleStartShopping = () => {
+    if (onStartShopping) {
+      onStartShopping();
+    } else {
+      navigate("/checkout");
+    }
+  };
+
+  const handleGoToCart = () => {
+    if (onGoToCart) {
+      onGoToCart();
+    } else {
+      navigate("/checkout/cart");
+    }
+  };
 
   const scrollToSection = (id) => {
     const el = document.getElementById(id);
@@ -32,7 +50,7 @@ function Welcome({ onStartShopping, onGoToInventory, onGoToDashboard }) {
 
           <div style={styles.ctaGroup}>
             <button
-              onClick={onStartShopping}
+              onClick={handleStartShopping}
               style={styles.primaryCta}
               className="touch-btn"
             >
@@ -223,11 +241,11 @@ function Welcome({ onStartShopping, onGoToInventory, onGoToDashboard }) {
             <p style={styles.ctaSubtitle}>Launch the terminal scanner and experience touchless checkout right now.</p>
           </div>
           <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
-            <button onClick={onStartShopping} style={styles.primaryCta} className="touch-btn">
+            <button onClick={handleStartShopping} style={styles.primaryCta} className="touch-btn">
               LAUNCH CHECKOUT CAMERA →
             </button>
-            <button onClick={onGoToInventory} style={styles.secondaryCta} className="touch-btn">
-              BROWSE INVENTORY
+            <button onClick={handleGoToCart} style={styles.secondaryCta} className="touch-btn">
+              VIEW SMART CART 🛒
             </button>
           </div>
         </div>

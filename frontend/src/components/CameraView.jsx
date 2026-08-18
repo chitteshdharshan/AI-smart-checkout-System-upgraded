@@ -1,10 +1,10 @@
-// CameraView.jsx – Generic multi-product scanner with atomic frame lock, Web Audio API beep & FIFO confirmation queue
-import React, { useEffect, useRef, useState } from "react";
+// CameraView.jsx – Generic multi-product scanner with atomic frame lock, Web Audio API beep, FIFO confirmation queue, & clean lifecycle recovery
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import Webcam from "react-webcam";
 import { addToCart } from "../api/cart";
 
 // Configurable constants for scanner performance & concurrency
-const SCAN_INTERVAL = 280;           // Faster responsive scan interval
+const SCAN_INTERVAL = 280;           // Fast responsive scan interval
 const BACKOFF_DELAY = 4000;
 const HANDLED_IOU_THRESHOLD = 0.35;
 const HANDLED_MISSING_FRAMES = 2;    // Fast lock release after 2 missing frames
@@ -55,9 +55,28 @@ function CameraView({
   };
 
   const [pendingProducts, setPendingProducts] = useState([]);
+  const pendingProductsRef = useRef([]);
+  const updatePendingProducts = (updater) => {
+    setPendingProducts((prev) => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      pendingProductsRef.current = next;
+      return next;
+    });
+  };
+
   const [submittingIds, setSubmittingIds] = useState(new Set());
   const [uncertainNotice, setUncertainNotice] = useState(null);
   const uncertainTimerRef = useRef(null);
+
+  // 5-Second preparation delay state after successful cart addition
+  const [isWaitingForNextProduct, setIsWaitingForNextProduct] = useState(false);
+  const isWaitingForNextProductRef = useRef(false);
+  const [nextProductCountdown, setNextProductCountdown] = useState(5);
+  const [justAddedProduct, setJustAddedProduct] = useState(null);
+  const countdownTimerRef = useRef(null);
+  const waitEndTimeRef = useRef(null);
+  const remainingWaitSecondsRef = useRef(5);
+  const waitSessionIdRef = useRef(1);
 
   const currentItem = pendingProducts.length > 0 ? pendingProducts[0] : null;
 
@@ -177,9 +196,143 @@ function CameraView({
     h: bbox[3] - bbox[1],
   });
 
+  const getScopedKey = (sessionId, trackId) => `${sessionId}_${trackId}`;
+
+  // =========================================================================
+  // Unified Safe Cleanup & Scanner Unlock Functions (Sections 1, 2, 4, 5)
+  // =========================================================================
+  const checkAndReleaseScanner = useCallback((sessionId) => {
+    // If waiting 5s delay is active, do not prematurely unlock
+    if (isWaitingForNextProductRef.current) return;
+
+    const queuedCount = queueRef.current.length;
+    const activeCount = activeTrackIdsRef.current.size;
+    const pendingCount = pendingProductsRef.current.length;
+
+    if (queuedCount === 0 && activeCount === 0 && pendingCount === 0) {
+      console.log(`[CLEANUP] scanId=${sessionId} no remaining tracks`);
+      capturedFrameRef.current = null;
+      scannerLockedRef.current = false;
+      yoloLockRef.current = false;
+      scanInProgressRef.current = false;
+      setRenderTracks([]);
+      console.log(`[SCAN] scanId=${sessionId} Frame lifecycle completed`);
+      console.log(`[SCAN] scanId=${sessionId} Scanner unlocked`);
+      console.log("[SCAN] Ready for next frame");
+      setScannerStateSync("SCANNING");
+      scheduleNextScan(150);
+    }
+  }, []);
+
+  const completeTrackProcessing = useCallback((sessionId, trackId, reason = "COMPLETED") => {
+    const scopedKey = getScopedKey(sessionId, trackId);
+    
+    queuedTrackIdsRef.current.delete(scopedKey);
+    activeTrackIdsRef.current.delete(scopedKey);
+    processedTrackIdsRef.current.add(scopedKey);
+
+    console.log(`[CLEANUP] scanId=${sessionId} trackId=${trackId} processing completed (${reason})`);
+
+    // Process any next track remaining in queue
+    processNextInQueue();
+
+    // Check if entire scan lifecycle for this frame is finished
+    checkAndReleaseScanner(sessionId);
+  }, [checkAndReleaseScanner]);
+
+  const startCountdownTimer = () => {
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+
+    countdownTimerRef.current = setInterval(() => {
+      if (!isScanningRef.current) {
+        return;
+      }
+
+      const now = Date.now();
+      const remainingSeconds = Math.max(0, Math.ceil((waitEndTimeRef.current - now) / 1000));
+      remainingWaitSecondsRef.current = remainingSeconds;
+      setNextProductCountdown(remainingSeconds);
+
+      const sessId = waitSessionIdRef.current;
+
+      if (remainingSeconds > 0) {
+        console.log(`[WAIT] scanId=${sessId} ${remainingSeconds} second${remainingSeconds === 1 ? "" : "s"} remaining`);
+      } else {
+        clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+        waitEndTimeRef.current = null;
+        console.log(`[WAIT] scanId=${sessId} Delay completed`);
+        console.log(`[SCAN] scanId=${sessId} Cleaning temporary scanner state`);
+
+        isWaitingForNextProductRef.current = false;
+        setIsWaitingForNextProduct(false);
+        setJustAddedProduct(null);
+
+        // Reset tracking structures cleanly for fresh scan
+        capturedFrameRef.current = null;
+        handledObjectsRef.current = [];
+        trackRegistryRef.current.clear();
+        matchedTrackIdsRef.current.clear();
+        processedTrackIdsRef.current.clear();
+        queuedTrackIdsRef.current.clear();
+        activeTrackIdsRef.current.clear();
+        beepedTracksRef.current.clear();
+        queueRef.current = [];
+        updatePendingProducts([]);
+        setRenderTracks([]);
+        scannerLockedRef.current = false;
+        yoloLockRef.current = false;
+        scanInProgressRef.current = false;
+
+        const nextScanId = scanSessionIdRef.current + 1;
+        console.log(`[SCAN] scanId=${nextScanId} Created fresh scan context`);
+        console.log(`[SCAN] scanId=${nextScanId} Scanner unlocked`);
+        console.log(`[SCAN] scanId=${nextScanId} Starting next scan`);
+
+        setScannerStateSync("SCANNING");
+
+        // Start fresh scan cycle automatically
+        if (scanTimerRef2.current) {
+          clearTimeout(scanTimerRef2.current);
+          scanTimerRef2.current = null;
+        }
+        if (isScanningRef.current) {
+          scheduleNextScan(80);
+        }
+      }
+    }, 1000);
+  };
+
+  const startNextProductDelay = (sessionId, productInfo) => {
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+
+    waitSessionIdRef.current = sessionId;
+    remainingWaitSecondsRef.current = 5;
+    waitEndTimeRef.current = Date.now() + 5000;
+
+    isWaitingForNextProductRef.current = true;
+    setIsWaitingForNextProduct(true);
+    setJustAddedProduct(productInfo);
+    setNextProductCountdown(5);
+    scannerLockedRef.current = true; // AI scanning paused during wait
+
+    console.log(`[WAIT] scanId=${sessionId} Starting 5-second next-product delay`);
+    console.log(`[WAIT] scanId=${sessionId} 5 seconds remaining`);
+
+    if (isScanningRef.current) {
+      startCountdownTimer();
+    }
+  };
+
   const sendYoloRequest = async () => {
-    if (scannerLockedRef.current || yoloLockRef.current) {
-      console.log("[SCAN] Frame locked - skipping scan");
+    if (scannerLockedRef.current || yoloLockRef.current || isWaitingForNextProductRef.current) {
+      console.log("[SCAN] Frame locked or waiting - skipping scan");
       return;
     }
 
@@ -191,7 +344,7 @@ function CameraView({
 
     const frameW = frameCanvasRef.current?.width || 0;
     const frameH = frameCanvasRef.current?.height || 0;
-    console.log(`[FRAME] scanId=${currentSessionId} Captured frame (${frameW}x${frameH}, ${blob.size} bytes)`);
+    console.log(`[FRAME] scanId=${currentSessionId} Capturing current frame (${frameW}x${frameH}, ${blob.size} bytes)`);
 
     scannerLockedRef.current = true;
     yoloLockRef.current = true;
@@ -218,6 +371,7 @@ function CameraView({
 
       if (currentSessionId !== scanSessionIdRef.current) {
         console.log(`[STALE] Ignoring result: scan=${currentSessionId} current=${scanSessionIdRef.current}`);
+        scannerLockedRef.current = false;
         return result;
       }
 
@@ -226,12 +380,25 @@ function CameraView({
       const detections = rawDetections.map(d => ({ ...d, yoloTimeMs: tYoloMs, frameW, frameH }));
       console.log(`[YOLO] scanId=${currentSessionId} Detection count: ${detections.length}`);
 
+      if (detections.length === 0) {
+        console.log(`[CLEANUP] scanId=${currentSessionId} no detections in frame`);
+        console.log(`[SCAN] scanId=${currentSessionId} Frame lifecycle completed`);
+        console.log(`[SCAN] scanId=${currentSessionId} Scanner unlocked`);
+        console.log("[SCAN] Ready for next frame");
+        scannerLockedRef.current = false;
+        capturedFrameRef.current = null;
+        setRenderTracks([]);
+        return result;
+      }
+
       updateTracks(detections, currentSessionId, blob);
       return result;
     } catch (e) {
       console.error(`[YOLO] scanId=${currentSessionId} request error:`, e.message);
       setScannerError("AI Scanner temporarily unavailable. Please retry.");
       scannerLockedRef.current = false;
+      capturedFrameRef.current = null;
+      console.log(`[SCAN] scanId=${currentSessionId} Scanner unlocked after YOLO error`);
     } finally {
       yoloLockRef.current = false;
     }
@@ -241,8 +408,6 @@ function CameraView({
     handledObjectsRef.current.some(
       (h) => computeIoU(box, h.box) > HANDLED_IOU_THRESHOLD
     );
-
-  const getScopedKey = (sessionId, trackId) => `${sessionId}_${trackId}`;
 
   const enqueueTrack = (trackId, detection, sessionId, frameBlob) => {
     const scopedKey = getScopedKey(sessionId, trackId);
@@ -260,6 +425,7 @@ function CameraView({
   const updateTracks = (detections, sessionId, frameBlob) => {
     if (sessionId !== scanSessionIdRef.current) {
       console.log(`[STALE] Ignoring updateTracks: scan=${sessionId} current=${scanSessionIdRef.current}`);
+      scannerLockedRef.current = false;
       return;
     }
 
@@ -280,12 +446,10 @@ function CameraView({
     handledObjectsRef.current = handledObjectsRef.current.filter((hObj, i) => {
       if (!activeHandledIndexes.has(i)) {
         hObj.missingCount = (hObj.missingCount || 0) + 1;
-        console.log(`[TRACK] Track ${hObj.trackId || "object"} missing frame ${hObj.missingCount}`);
       }
       const isMissing = hObj.missingCount >= HANDLED_MISSING_FRAMES;
       const isExpired  = now - hObj.timestamp > HANDLED_TRACK_TIMEOUT;
       if (isMissing || isExpired) {
-        console.log(`[TRACK] Track ${hObj.trackId || "object"} disappeared`);
         console.log(`[TRACK] Track ${hObj.trackId || "object"} lock released`);
         return false;
       }
@@ -348,15 +512,21 @@ function CameraView({
     console.log(`[PIPELINE] Active tracks: ${activeCount}`);
     console.log(`[PIPELINE] Queued tracks: ${queuedCount}`);
     console.log(`[PIPELINE] Processing tracks: ${processingCount}`);
-    console.log(`[PIPELINE] Pending confirmations: ${pendingProducts.length}`);
+    console.log(`[PIPELINE] Pending confirmations: ${pendingProductsRef.current.length}`);
     console.log(`[PIPELINE] Handled objects: ${handledCount}`);
 
-    if (queueRef.current.length === 0 && activeTrackIdsRef.current.size === 0 && pendingProducts.length === 0) {
-      scannerLockedRef.current = false;
-    }
-
     setRenderTracks([...registry.values()]);
-    processNextInQueue();
+
+    if (queueRef.current.length === 0 && activeTrackIdsRef.current.size === 0 && pendingProductsRef.current.length === 0) {
+      console.log(`[CLEANUP] scanId=${sessionId} no tracks enqueued to process`);
+      console.log(`[SCAN] scanId=${sessionId} Frame lifecycle completed`);
+      console.log(`[SCAN] scanId=${sessionId} Scanner unlocked`);
+      console.log("[SCAN] Ready for next frame");
+      scannerLockedRef.current = false;
+      capturedFrameRef.current = null;
+    } else {
+      processNextInQueue();
+    }
   };
 
   const processNextInQueue = () => {
@@ -385,11 +555,15 @@ function CameraView({
     try {
       if (sessionId !== scanSessionIdRef.current) {
         console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
+        completeTrackProcessing(sessionId, trackId, "STALE_SCAN");
         return;
       }
 
       const sourceBlob = frameBlob || capturedFrameRef.current || captureVideoFrame();
-      if (!sourceBlob) return;
+      if (!sourceBlob) {
+        completeTrackProcessing(sessionId, trackId, "NO_SOURCE_FRAME");
+        return;
+      }
 
       // Crop directly from frozen captured frame image
       const imgUrl = URL.createObjectURL(sourceBlob);
@@ -401,6 +575,7 @@ function CameraView({
 
       if (sessionId !== scanSessionIdRef.current) {
         console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
+        completeTrackProcessing(sessionId, trackId, "STALE_SCAN");
         return;
       }
 
@@ -447,6 +622,7 @@ function CameraView({
 
       if (sessionId !== scanSessionIdRef.current) {
         console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
+        completeTrackProcessing(sessionId, trackId, "STALE_SCAN");
         return;
       }
 
@@ -474,6 +650,7 @@ function CameraView({
 
       if (sessionId !== scanSessionIdRef.current) {
         console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
+        completeTrackProcessing(sessionId, trackId, "STALE_SCAN");
         return;
       }
 
@@ -502,16 +679,18 @@ function CameraView({
 
       if (sessionId !== scanSessionIdRef.current) {
         console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
+        completeTrackProcessing(sessionId, trackId, "STALE_SCAN");
         return;
       }
 
       if (embeddingVector.length !== 384) {
         console.error(`[EMBED] Dimension mismatch: expected 384, got ${embeddingVector.length}`);
+        completeTrackProcessing(sessionId, trackId, "EMBED_DIMENSION_MISMATCH");
         return;
       }
 
       // 6. FAISS Top-K Search
-      console.log(`[FAISS] scanId=${sessionId} trackId=${trackId} searching Top-K candidates`);
+      console.log(`[FAISS] scanId=${sessionId} trackId=${trackId} searching`);
       const tFaissStart = performance.now();
       const faissResp = await fetch("/api/ai/faiss/search", {
         method: "POST",
@@ -530,12 +709,6 @@ function CameraView({
       const similarity = match.similarity || 0;
       const finalScore = match.final_score || match.similarity || 0;
 
-      // Structured FAISS Debug Logging
-      console.log("[FAISS] Raw response:", faissResult);
-      console.log(`[FAISS] Returned product_id: ${match.product_id || "none"}`);
-      console.log(`[FAISS] Returned product name: ${match.name || "none"}`);
-      console.log(`[FAISS] similarity: ${similarity.toFixed(4)}`);
-
       if (match.candidates && match.candidates.length > 0) {
         const topCandidate = match.candidates[0];
         console.log(`[FAISS] scanId=${sessionId} trackId=${trackId} candidate="${topCandidate.name}" similarity=${(topCandidate.similarity || 0).toFixed(2)}`);
@@ -543,6 +716,7 @@ function CameraView({
 
       if (sessionId !== scanSessionIdRef.current) {
         console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
+        completeTrackProcessing(sessionId, trackId, "STALE_SCAN");
         return;
       }
 
@@ -558,13 +732,9 @@ function CameraView({
 
         if (!prodResp.ok) {
           console.warn(`[DB] Product ID not found in catalog: ${mongoId}`);
-          console.warn(`[DB] Rejecting FAISS candidate instead of displaying wrong product`);
-          console.log(`[MATCH] Rejected track ${trackId}: reason=PRODUCT_ID_NOT_IN_CATALOG score=${finalScore.toFixed(2)}`);
-          if (uncertainTimerRef.current) clearTimeout(uncertainTimerRef.current);
-          setUncertainNotice("PRODUCT UNCERTAIN - PLEASE RESCAN");
-          uncertainTimerRef.current = setTimeout(() => {
-            setUncertainNotice(null);
-          }, 3000);
+          console.log(`[MATCH] scanId=${sessionId} trackId=${trackId} rejected: PRODUCT_ID_NOT_IN_CATALOG`);
+          showRejectionNotice("Product not recognized", "Please reposition the product and scan again.");
+          completeTrackProcessing(sessionId, trackId, "PRODUCT_ID_NOT_IN_CATALOG");
           return;
         }
 
@@ -573,18 +743,15 @@ function CameraView({
 
         if (!dbProduct || !dbProduct._id) {
           console.warn(`[DB] Product ID not found in catalog: ${mongoId}`);
-          console.warn(`[DB] Rejecting FAISS candidate instead of displaying wrong product`);
-          console.log(`[MATCH] Rejected track ${trackId}: reason=PRODUCT_ID_NOT_IN_CATALOG score=${finalScore.toFixed(2)}`);
-          if (uncertainTimerRef.current) clearTimeout(uncertainTimerRef.current);
-          setUncertainNotice("PRODUCT UNCERTAIN - PLEASE RESCAN");
-          uncertainTimerRef.current = setTimeout(() => {
-            setUncertainNotice(null);
-          }, 3000);
+          console.log(`[MATCH] scanId=${sessionId} trackId=${trackId} rejected: PRODUCT_NOT_FOUND_IN_DB`);
+          showRejectionNotice("Product not recognized", "Please reposition the product and scan again.");
+          completeTrackProcessing(sessionId, trackId, "PRODUCT_NOT_FOUND_IN_DB");
           return;
         }
 
         if (sessionId !== scanSessionIdRef.current) {
           console.log(`[STALE] Ignoring result: scan=${sessionId} current=${scanSessionIdRef.current}`);
+          completeTrackProcessing(sessionId, trackId, "STALE_SCAN");
           return;
         }
 
@@ -619,35 +786,42 @@ function CameraView({
           scanId: sessionId,
         };
 
-        setPendingProducts((prev) => {
+        updatePendingProducts((prev) => {
           if (prev.some((p) => p.scanId === sessionId && p.trackId === trackId)) return prev;
           if (prev.some((p) => p.trackId === trackId)) return prev;
-          const updated = [...prev, pendingData];
-          return updated;
+          return [...prev, pendingData];
         });
 
         setScannerStateSync("CONFIRMING");
+
+        // Keep active until user confirms or cancels
+        activeTrackIdsRef.current.delete(scopedKey);
+        processedTrackIdsRef.current.add(scopedKey);
+        processNextInQueue();
       } else {
-        console.log(`[MATCH] Rejected track ${trackId}: reason=${match.reason || "NO_CONFIDENT_MATCH"} score=${finalScore.toFixed(2)}`);
+        const rejectionReason = match.reason || "NO_CONFIDENT_PRODUCT_MATCH";
+        console.log(`[MATCH] scanId=${sessionId} trackId=${trackId} rejected: ${rejectionReason}`);
         console.log(`[FAISS] scanId=${sessionId} trackId=${trackId} no confident match found`);
-        if (uncertainTimerRef.current) clearTimeout(uncertainTimerRef.current);
-        setUncertainNotice("PRODUCT UNCERTAIN - PLEASE RESCAN");
-        uncertainTimerRef.current = setTimeout(() => {
-          setUncertainNotice(null);
-        }, 3000);
+        
+        showRejectionNotice("Product not recognized", "Please reposition the product and scan again.");
+        completeTrackProcessing(sessionId, trackId, rejectionReason);
       }
     } catch (e) {
       console.error(`[PIPELINE] scanId=${sessionId} trackId=${trackId} error:`, e.message);
-      setScannerError("AI Scanner temporarily unavailable. Please retry.");
+      showRejectionNotice("Product not recognized", "Please reposition the product and scan again.");
+      completeTrackProcessing(sessionId, trackId, `ERROR_${e.message}`);
     } finally {
       const tTotalMs = Math.round(performance.now() - tStart) + yoloTimeMs;
       console.log(`[PERF] Track ${trackId} TOTAL: ${tTotalMs} ms (YOLO: ${yoloTimeMs}ms, OCR: ${tOcrMs}ms, VLM: ${tVlmMs}ms, EMBED: ${tEmbedMs}ms, FAISS: ${tFaissMs}ms, DB: ${tDbMs}ms)`);
-
-      activeTrackIdsRef.current.delete(scopedKey);
-      processedTrackIdsRef.current.add(scopedKey);
-
-      processNextInQueue();
     }
+  };
+
+  const showRejectionNotice = (title, sub) => {
+    if (uncertainTimerRef.current) clearTimeout(uncertainTimerRef.current);
+    setUncertainNotice({ title, sub });
+    uncertainTimerRef.current = setTimeout(() => {
+      setUncertainNotice(null);
+    }, 3500);
   };
 
   useEffect(() => {
@@ -667,14 +841,22 @@ function CameraView({
       if (conf < 0.25 && info.detection?.source !== "full_frame_fallback") return;
       if (["scissors", "person", "chair", "couch", "bed", "dining table", "tv"].includes(cName) && conf < 0.40) return;
 
-      const { x, y, w, h } = info.detection.box;
+      const box = info.detection?.box;
+      if (!box) return;
+      const x = Number(box.x);
+      const y = Number(box.y);
+      const w = Number(box.w);
+      const h = Number(box.h);
+
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return;
+
       const isPending = pendingProducts.some((p) => p.trackId === info.trackId);
       const isHandled = isBoxHandled(info.detection.box);
 
       const color = isPending ? "#34d399" : isHandled ? "rgba(148, 163, 184, 0.4)" : "#38bdf8";
       const cornerLen = Math.max(10, Math.min(24, w * 0.22, h * 0.22));
 
-      // ── 1. Sleek Corner Brackets (No large filled rectangle) ──
+      // ── 1. Sleek Corner Brackets ──
       ctx.save();
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
@@ -738,12 +920,12 @@ function CameraView({
       ctx.fill();
       ctx.stroke();
 
-      // Title line: [ Product • 52% ]
+      // Title line
       ctx.fillStyle = isPending ? "#34d399" : "#38bdf8";
       ctx.font = "bold 11px Outfit, sans-serif";
       ctx.fillText(titleText, badgeX + 8, badgeY + 13);
 
-      // Status line: ● AI DETECTED
+      // Status line
       ctx.fillStyle = isPending ? "#6ee7b7" : "#94a3b8";
       ctx.font = "600 9px Outfit, sans-serif";
       ctx.fillText(statusText, badgeX + 8, badgeY + 24);
@@ -759,7 +941,12 @@ function CameraView({
     const currentGen = scanGenerationRef.current;
     if (!isScanningRef.current) return;
 
-    if (scannerLockedRef.current || yoloLockRef.current || pendingProducts.length > 0) {
+    if (
+      scannerLockedRef.current ||
+      yoloLockRef.current ||
+      pendingProductsRef.current.length > 0 ||
+      isWaitingForNextProductRef.current
+    ) {
       scheduleNextScan(350);
       return;
     }
@@ -787,19 +974,47 @@ function CameraView({
     if (isScanning) {
       scanGenerationRef.current += 1;
       setScannerStateSync("SCANNING");
-      if (scanTimerRef2.current) clearTimeout(scanTimerRef2.current);
-      scanTimerRef2.current = setTimeout(runScanIteration, 0);
+      if (isWaitingForNextProductRef.current) {
+        const remaining = remainingWaitSecondsRef.current;
+        waitEndTimeRef.current = Date.now() + remaining * 1000;
+        console.log(`[WAIT] scanId=${waitSessionIdRef.current} Resuming countdown from ${remaining} second${remaining === 1 ? "" : "s"}`);
+        startCountdownTimer();
+      } else {
+        if (scanTimerRef2.current) clearTimeout(scanTimerRef2.current);
+        scanTimerRef2.current = setTimeout(runScanIteration, 0);
+      }
     } else {
       setScannerStateSync("IDLE");
       if (scanTimerRef2.current) {
         clearTimeout(scanTimerRef2.current);
         scanTimerRef2.current = null;
       }
+      if (isWaitingForNextProductRef.current) {
+        if (countdownTimerRef.current) {
+          clearInterval(countdownTimerRef.current);
+          countdownTimerRef.current = null;
+        }
+        if (waitEndTimeRef.current) {
+          const remaining = Math.max(1, Math.ceil((waitEndTimeRef.current - Date.now()) / 1000));
+          remainingWaitSecondsRef.current = remaining;
+          setNextProductCountdown(remaining);
+          console.log(`[WAIT] scanId=${waitSessionIdRef.current} Countdown paused at ${remaining} second${remaining === 1 ? "" : "s"}`);
+          waitEndTimeRef.current = null;
+        }
+      }
     }
     return () => {
       if (scanTimerRef2.current) {
         clearTimeout(scanTimerRef2.current);
         scanTimerRef2.current = null;
+      }
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+      }
+      if (uncertainTimerRef.current) {
+        clearTimeout(uncertainTimerRef.current);
+        uncertainTimerRef.current = null;
       }
     };
   }, [isScanning]);
@@ -817,6 +1032,7 @@ function CameraView({
       const dbProductName = dbProduct?.name || item.name;
 
       console.log(`[CART] Product successfully added`);
+      console.log(`[CONFIRM] scanId=${item.scanId} trackId=${item.trackId} product="${dbProductName}" added to cart`);
 
       if (typeof onAddToCart === "function") {
         onAddToCart({
@@ -839,35 +1055,20 @@ function CameraView({
         missingCount: 0,
       });
 
-      // Do NOT clear captured frame here; wait until all products are handled
+      // Remove from pending products list
+      updatePendingProducts((prev) => prev.filter((p) => p.trackId !== item.trackId));
 
-      setPendingProducts((prev) => {
-        const updated = prev.filter((p) => p.trackId !== item.trackId);
-        if (updated.length === 0) {
-          // All products from this frame handled – cleanly reset scanner lifecycle for next scan
-          capturedFrameRef.current = null;
-          handledObjectsRef.current = [];
-          trackRegistryRef.current.clear();
-          matchedTrackIdsRef.current.clear();
-          processedTrackIdsRef.current.clear();
-          queuedTrackIdsRef.current.clear();
-          activeTrackIdsRef.current.clear();
-          beepedTracksRef.current.clear();
-          queueRef.current = [];
-          scanSessionIdRef.current += 1;
-          setRenderTracks([]);
-          console.log("[FRAME] Captured frame and track state cleared after final product");
-          scannerLockedRef.current = false;
-          console.log("[SCAN] Frame lifecycle completed");
-          console.log("[SCAN] Scanner unlocked");
-          console.log("[SCAN] Ready for next frame");
-          setScannerStateSync("SCANNING");
-        }
-        return updated;
+      // Start the 5-Second Wait Window (Section 13)
+      startNextProductDelay(item.scanId, {
+        name: dbProductName,
+        price: item.price,
+        brand: item.brand,
       });
     } catch (err) {
       console.error(`[CART] Cart update failed: ${err.message}`);
       alert(`Cart Update Error: ${err.message}`);
+      // Unlock on failure so user isn't stuck
+      scannerLockedRef.current = false;
     } finally {
       setSubmittingIds((prev) => {
         const next = new Set(prev);
@@ -889,8 +1090,7 @@ function CameraView({
       missingCount: 0,
     });
 
-    // Clear and unlock if all items handled
-    setPendingProducts((prev) => {
+    updatePendingProducts((prev) => {
       const updated = prev.filter((p) => p.trackId !== item.trackId);
       if (updated.length === 0) {
         // All items handled – cleanly reset scanner lifecycle for next scan
@@ -903,22 +1103,26 @@ function CameraView({
         activeTrackIdsRef.current.clear();
         beepedTracksRef.current.clear();
         queueRef.current = [];
-        scanSessionIdRef.current += 1;
+        const nextScanId = scanSessionIdRef.current + 1;
         setRenderTracks([]);
-        console.log("[FRAME] Captured frame and track state cleared after final cancellation");
+        console.log("[FRAME] Captured frame and track state cleared after cancellation");
         scannerLockedRef.current = false;
-        console.log("[SCAN] Frame lifecycle completed");
-        console.log("[SCAN] Scanner unlocked");
+        yoloLockRef.current = false;
+        scanInProgressRef.current = false;
+        console.log(`[SCAN] scanId=${item.scanId} Frame lifecycle completed`);
+        console.log(`[SCAN] scanId=${nextScanId} Scanner unlocked`);
         console.log("[SCAN] Ready for next frame");
         setScannerStateSync("SCANNING");
+        scheduleNextScan(150);
       }
       return updated;
     });
   };
 
   const getStatusText = () => {
+    if (isWaitingForNextProduct) return { icon: "⏳", label: `NEXT PRODUCT IN ${nextProductCountdown}S...`, color: "#38bdf8" };
     if (pendingProducts.length > 0) return { icon: "✓", label: "PRODUCT RECOGNIZED", color: "#34d399" };
-    if (uncertainNotice) return { icon: "⚠️", label: uncertainNotice, color: "#f59e0b" };
+    if (uncertainNotice) return { icon: "⚠️", label: uncertainNotice.title.toUpperCase(), color: "#f59e0b" };
     if (activeTrackIdsRef.current.size > 0) return { icon: "●", label: "AI PROCESSING...", color: "#38bdf8" };
     if (scannerLockedRef.current || yoloLockRef.current) return { icon: "●", label: "SCANNING OBJECT...", color: "#38bdf8" };
     if (scannerState === "SCANNING") return { icon: "●", label: "AI VISION ACTIVE", color: "#34d399" };
@@ -930,7 +1134,7 @@ function CameraView({
   return (
     <div style={styles.container} className="hud-pulse">
       {/* Animated Scanning Laser Beam */}
-      {(scannerState === "SCANNING" || scannerLockedRef.current) && (
+      {(scannerState === "SCANNING" || scannerLockedRef.current) && !isWaitingForNextProduct && (
         <div className="laser-line" />
       )}
 
@@ -946,31 +1150,48 @@ function CameraView({
         <span>1080P AI VISION FEED</span>
       </div>
 
-      {/* Non-blocking Uncertain Rescan Notification Banner */}
-      {uncertainNotice && pendingProducts.length === 0 && (
-        <div
-          style={{
-            position: "absolute",
-            top: "3.5rem",
-            left: "50%",
-            transform: "translateX(-50%)",
-            background: "rgba(245, 158, 11, 0.92)",
-            color: "#0f172a",
-            padding: "0.45rem 1.1rem",
-            borderRadius: "9999px",
-            fontSize: "0.82rem",
-            fontWeight: "800",
-            letterSpacing: "0.04em",
-            zIndex: 35,
-            boxShadow: "0 4px 15px rgba(245, 158, 11, 0.4)",
-            display: "flex",
-            alignItems: "center",
-            gap: "0.4rem",
-            animation: "fadeIn 0.2s ease-in-out",
-          }}
-        >
-          <span>⚠️</span>
-          <span>PRODUCT UNCERTAIN - PLEASE RESCAN</span>
+      {/* 5-Second Next-Product Countdown Status Window (Section 13) */}
+      {isWaitingForNextProduct && justAddedProduct && (
+        <div style={styles.countdownBanner} className="cyber-glass-card">
+          <div style={styles.countdownHeader}>
+            <div style={styles.countdownCheckIcon}>✓</div>
+            <div>
+              <div style={styles.countdownTitle}>✓ Added to Smart Cart</div>
+              <div style={styles.countdownProductName}>
+                {justAddedProduct.name} • ₹{justAddedProduct.price}
+              </div>
+            </div>
+          </div>
+          <div style={styles.countdownDivider} />
+          <div style={styles.countdownFooter}>
+            <div style={styles.countdownLabelGroup}>
+              <span style={styles.countdownLabel}>Next product can be placed in:</span>
+              <span style={styles.countdownSub}>Position the next item inside the vision zone</span>
+            </div>
+            <div style={styles.countdownNumberCircle}>
+              {nextProductCountdown}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Non-blocking Product Rejection Notification Banner (Section 8) */}
+      {uncertainNotice && !isWaitingForNextProduct && pendingProducts.length === 0 && (
+        <div style={styles.rejectionBanner} className="cyber-glass-card">
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+            <span style={{ fontSize: "1.3rem" }}>⚠️</span>
+            <div>
+              <div style={styles.rejectionTitle}>{uncertainNotice.title}</div>
+              <div style={styles.rejectionSub}>{uncertainNotice.sub}</div>
+            </div>
+          </div>
+          <button
+            onClick={() => setUncertainNotice(null)}
+            style={styles.rejectionDismissBtn}
+            className="touch-btn"
+          >
+            Try Again
+          </button>
         </div>
       )}
 
@@ -1028,7 +1249,7 @@ function CameraView({
       </div>
 
       {/* Single-Product FIFO Confirmation Queue Modal Overlay */}
-      {pendingProducts.length > 0 && currentItem && (
+      {pendingProducts.length > 0 && currentItem && !isWaitingForNextProduct && (
         <div style={styles.modalOverlay}>
           <div style={styles.modalCard} className="cyber-glass-card">
             <div style={styles.modalHeader}>
@@ -1172,6 +1393,126 @@ const styles = {
     alignItems: "center",
     boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.5)",
   },
+  countdownBanner: {
+    position: "absolute",
+    top: "3.5rem",
+    left: "50%",
+    transform: "translateX(-50%)",
+    width: "420px",
+    maxWidth: "92vw",
+    borderRadius: "1rem",
+    padding: "1rem 1.25rem",
+    zIndex: 40,
+    border: "1px solid rgba(52, 211, 153, 0.4)",
+    boxShadow: "0 15px 35px -10px rgba(0, 0, 0, 0.8), 0 0 25px rgba(52, 211, 153, 0.25)",
+    animation: "fadeIn 0.25s ease-out",
+  },
+  countdownHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.85rem",
+  },
+  countdownCheckIcon: {
+    width: "36px",
+    height: "36px",
+    borderRadius: "50%",
+    backgroundColor: "rgba(52, 211, 153, 0.2)",
+    color: "#34d399",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontWeight: "900",
+    fontSize: "1.2rem",
+    border: "1px solid rgba(52, 211, 153, 0.5)",
+  },
+  countdownTitle: {
+    color: "#34d399",
+    fontWeight: "900",
+    fontSize: "1rem",
+    letterSpacing: "0.02em",
+  },
+  countdownProductName: {
+    color: "#cbd5e1",
+    fontSize: "0.85rem",
+    fontWeight: "700",
+    marginTop: "0.15rem",
+  },
+  countdownDivider: {
+    height: "1px",
+    backgroundColor: "rgba(51, 65, 85, 0.6)",
+    margin: "0.75rem 0",
+  },
+  countdownFooter: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  countdownLabelGroup: {
+    display: "flex",
+    flexDirection: "column",
+  },
+  countdownLabel: {
+    color: "#f8fafc",
+    fontSize: "0.85rem",
+    fontWeight: "800",
+  },
+  countdownSub: {
+    color: "#94a3b8",
+    fontSize: "0.72rem",
+    marginTop: "0.1rem",
+  },
+  countdownNumberCircle: {
+    width: "40px",
+    height: "40px",
+    borderRadius: "50%",
+    background: "linear-gradient(135deg, #0284c7, #38bdf8)",
+    color: "#ffffff",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontWeight: "900",
+    fontSize: "1.4rem",
+    boxShadow: "0 0 15px rgba(56, 189, 248, 0.5)",
+  },
+  rejectionBanner: {
+    position: "absolute",
+    top: "3.5rem",
+    left: "50%",
+    transform: "translateX(-50%)",
+    width: "440px",
+    maxWidth: "92vw",
+    borderRadius: "1rem",
+    padding: "0.85rem 1.15rem",
+    zIndex: 40,
+    border: "1px solid rgba(245, 158, 11, 0.4)",
+    boxShadow: "0 15px 35px -10px rgba(0, 0, 0, 0.8), 0 0 20px rgba(245, 158, 11, 0.2)",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: "0.75rem",
+    animation: "fadeIn 0.25s ease-out",
+  },
+  rejectionTitle: {
+    color: "#fbbf24",
+    fontWeight: "800",
+    fontSize: "0.92rem",
+  },
+  rejectionSub: {
+    color: "#cbd5e1",
+    fontSize: "0.78rem",
+    marginTop: "0.1rem",
+  },
+  rejectionDismissBtn: {
+    padding: "0.4rem 0.85rem",
+    backgroundColor: "rgba(245, 158, 11, 0.2)",
+    border: "1px solid rgba(245, 158, 11, 0.5)",
+    color: "#fbbf24",
+    borderRadius: "0.5rem",
+    fontWeight: "800",
+    fontSize: "0.78rem",
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
   modalOverlay: {
     position: "absolute",
     top: 0,
@@ -1312,4 +1653,3 @@ const styles = {
 };
 
 export default CameraView;
-
