@@ -2,6 +2,7 @@
 import React, { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import CameraView from "../components/CameraView";
+import glassStyles from "../components/GlassCard.module.css";
 import { useCart } from "../context/CartContext";
 
 function Camera({ onAddToCart, cartCount, onGoToCart }) {
@@ -54,7 +55,7 @@ function Camera({ onAddToCart, cartCount, onGoToCart }) {
       </div>
 
       {/* Main Camera Viewport */}
-      <div style={styles.cameraCard} className="cyber-glass">
+      <div className={`${glassStyles.glassCard} cyber-glass`}>
         {/* Sub-header inside camera card */}
         <div style={styles.cameraHeader}>
           <div style={styles.feedStatus}>
